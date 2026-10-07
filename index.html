@@ -6,6 +6,7 @@
     <title>Neon Grid 2084</title>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
     <style>
         body, html {
             margin: 0; padding: 0; width: 100%; height: 100%;
@@ -107,6 +108,14 @@
             width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        #wave-announcement {
+            position: absolute; top: 40%; left: 0; width: 100%;
+            text-align: center; font-size: clamp(2rem, 5vw, 4rem);
+            pointer-events: none; z-index: 25; display: none;
+            animation: pulse 1s infinite alternate;
+        }
+        @keyframes pulse { from { opacity: 0.7; transform: scale(1); } to { opacity: 1; transform: scale(1.1); } }
     </style>
 </head>
 <body>
@@ -118,6 +127,8 @@
         <div style="text-align:center;">WAVE: <br><span id="wave-display" class="glow-text-magenta">1</span></div>
         <div style="text-align:right;">LIVES: <br><span id="lives-display" class="glow-text-green">3</span></div>
     </div>
+
+    <div id="wave-announcement" class="glow-text-magenta">WAVE 1</div>
 
     <canvas id="gameCanvas"></canvas>
 
@@ -273,6 +284,13 @@
         let waveActive = false;
         let enemiesToSpawn = 0;
         let spawnCooldown = 0;
+        
+        let isWaveTransition = false;
+        let waveTimer = 0;
+        let isRespawning = false;
+        let respawnTimer = 0;
+
+        let synth, noiseSynth;
 
         const keys = { w: false, a: false, s: false, d: false, ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
         const joysticks = {
@@ -342,6 +360,33 @@
             stick.dy = dy / MAX_JOY_RADIUS;
         }
 
+        function initAudio() {
+            if (synth) return;
+            synth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "square" },
+                envelope: { attack: 0.01, decay: 0.1, sustain: 0.0, release: 0.1 }
+            }).toDestination();
+            synth.volume.value = -12;
+
+            noiseSynth = new Tone.NoiseSynth({
+                noise: { type: "white" },
+                envelope: { attack: 0.01, decay: 0.2, sustain: 0 }
+            }).toDestination();
+            noiseSynth.volume.value = -15;
+        }
+
+        function playSound(type) {
+            if (!synth) return;
+            try {
+                if (type === 'shoot') synth.triggerAttackRelease("C6", "32n");
+                else if (type === 'hit') noiseSynth.triggerAttackRelease("32n");
+                else if (type === 'explosion') noiseSynth.triggerAttackRelease("8n");
+                else if (type === 'waveStart') synth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "4n");
+                else if (type === 'playerDeath') synth.triggerAttackRelease(["C3", "F#2", "C2"], "2n");
+                else if (type === 'gameOver') synth.triggerAttackRelease(["C3", "G2", "C2"], "1n");
+            } catch(e) {}
+        }
+
         class Player {
             constructor() {
                 this.x = width / 2;
@@ -388,6 +433,7 @@
                     if (sx !== 0 || sy !== 0) {
                         bullets.push(new Bullet(this.x, this.y, sx, sy));
                         this.shootTimer = this.shootRate;
+                        playSound('shoot');
                     }
                 }
             }
@@ -513,8 +559,10 @@
                 if (this.hp <= 0) {
                     this.dead = true;
                     createParticles(this.x, this.y, 15, this.color, 1.2);
+                    playSound('explosion');
                     return this.score;
                 }
+                playSound('hit');
                 return 0;
             }
         }
@@ -537,6 +585,14 @@
             enemiesToSpawn = 10 + (currentWave * 4);
             spawnCooldown = 1.0;
             createParticles(width/2, height/2, 40, '#0f0', 2.5); 
+            
+            isWaveTransition = true;
+            waveTimer = 2.5;
+            const waveAnnouncer = document.getElementById('wave-announcement');
+            waveAnnouncer.innerText = 'WAVE ' + currentWave;
+            waveAnnouncer.style.display = 'block';
+            
+            playSound('waveStart');
             updateHUD();
         }
 
@@ -556,7 +612,7 @@
             }
 
             // Player vs Enemy
-            if (player.invuln <= 0) {
+            if (player.invuln <= 0 && !isRespawning) {
                 for (let i = 0; i < enemies.length; i++) {
                     if (Math.hypot(player.x - enemies[i].x, player.y - enemies[i].y) < player.radius + enemies[i].radius - 3) {
                         playerHit(); break;
@@ -568,6 +624,7 @@
         function playerHit() {
             createParticles(player.x, player.y, 40, player.color, 3);
             lives--; updateHUD();
+            playSound('playerDeath');
             
             // Push enemies back on hit
             enemies.forEach(e => {
@@ -575,7 +632,10 @@
             });
 
             if (lives <= 0) gameOver();
-            else { player.invuln = 2.5; player.x = width / 2; player.y = height / 2; }
+            else { 
+                isRespawning = true;
+                respawnTimer = 2.0;
+            }
         }
 
         function updateHUD() {
@@ -585,7 +645,27 @@
         }
 
         function update(dt) {
-            player.update(dt);
+            if (isWaveTransition) {
+                waveTimer -= dt;
+                if (waveTimer <= 0) {
+                    isWaveTransition = false;
+                    document.getElementById('wave-announcement').style.display = 'none';
+                }
+            }
+
+            if (isRespawning) {
+                respawnTimer -= dt;
+                if (respawnTimer <= 0) {
+                    isRespawning = false;
+                    player.x = width / 2; 
+                    player.y = height / 2;
+                    player.invuln = 2.5;
+                }
+            }
+
+            if (!isRespawning) {
+                player.update(dt);
+            }
 
             for (let i = bullets.length - 1; i >= 0; i--) {
                 bullets[i].update(dt);
@@ -595,7 +675,11 @@
             }
 
             for (let i = enemies.length - 1; i >= 0; i--) {
-                enemies[i].update(dt, player.x, player.y);
+                if (isRespawning) {
+                    enemies[i].update(dt, enemies[i].x, enemies[i].y);
+                } else {
+                    enemies[i].update(dt, player.x, player.y);
+                }
                 if (enemies[i].dead) enemies.splice(i, 1);
             }
 
@@ -606,7 +690,7 @@
 
             checkCollisions();
 
-            if (waveActive) {
+            if (waveActive && !isWaveTransition) {
                 if (enemiesToSpawn > 0) {
                     spawnCooldown -= dt;
                     if (spawnCooldown <= 0) {
@@ -618,7 +702,7 @@
                     setTimeout(() => {
                         currentWave++; score += 500 * currentWave; 
                         startWave();
-                    }, 2000); // 2 second pause between waves
+                    }, 1000); // Wait 1s before triggering the new wave transition
                 }
             }
         }
@@ -638,7 +722,7 @@
             particles.forEach(p => p.draw(ctx));
             bullets.forEach(b => b.draw(ctx));
             enemies.forEach(e => e.draw(ctx));
-            if (player) player.draw(ctx);
+            if (player && !isRespawning) player.draw(ctx);
 
             // Draw Virtual Joysticks
             ['left', 'right'].forEach(side => {
@@ -672,7 +756,10 @@
             if (id) document.getElementById(id).classList.add('active');
         }
 
-        function startGame() {
+        async function startGame() {
+            await Tone.start();
+            initAudio();
+
             player = new Player();
             bullets = []; enemies = []; particles = [];
             score = 0; lives = 3; currentWave = 1;
@@ -699,6 +786,7 @@
             document.getElementById('submitting-loader').classList.add('hidden');
             
             showScreen('screen-gameover');
+            playSound('gameOver');
             setTimeout(() => document.getElementById('initials-input').focus(), 100);
         }
 
